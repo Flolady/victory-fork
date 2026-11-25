@@ -1,0 +1,61 @@
+name: Hourly upstream sync
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hourly-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check upstream deletions, then merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/fxceless/victory-fork.git
+          git fetch --quiet upstream main
+
+          base="$(git merge-base HEAD upstream/main)" || {
+            echo "::error::Could not find a common ancestor with upstream/main; stopping without syncing."
+            echo "Could not find a common ancestor with upstream/main. No files were changed." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
+
+          deleted="$(git diff --diff-filter=D --name-only "$base" upstream/main)"
+          if [[ -n "$deleted" ]]; then
+            {
+              echo "## Upstream deletion guard stopped this sync"
+              echo "The upstream has deleted these paths since the common ancestor. Review them and sync manually if appropriate:"
+              echo
+              printf '%s\\n' "$deleted"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Upstream deletion(s) detected. No merge or push was performed."
+            exit 1
+          fi
+
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already up to date."
+            exit 0
+          fi
+
+          if ! git merge --no-edit --no-ff upstream/main; then
+            echo "::error::Merge conflict. No push was performed."
+            echo "Merge conflict while syncing upstream. Resolve it manually; no push was performed." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git push origin HEAD:main
